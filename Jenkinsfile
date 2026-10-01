@@ -6,7 +6,8 @@ pipeline {
         string(name: 'AWS_ACCOUNT_ID', defaultValue: '888577028066', description: 'AWS Account ID for Amazon ECR')
         string(name: 'ECR_REPO_NAME', defaultValue: 'amish', description: 'ECR Repository Name')
         string(name: 'IMAGE_TAG', defaultValue: 'frontend', description: 'Docker Image Tag')
-        string(name: 'EC2_HOST', defaultValue: 'ec2-35-171-225-161.compute-1.amazonaws.com', description: 'EC2 Public DNS or IP')
+        string(name: 'TARGET_GROUP_NAME', defaultValue: 'TargetGroup-1', description: 'AWS ELB Target Group Name to discover instances from')
+        string(name: 'FALLBACK_EC2_HOSTS', defaultValue: 'ec2-35-171-225-161.compute-1.amazonaws.com', description: 'Comma-separated fallback EC2 hostnames if auto-discovery cannot be queried')
         string(name: 'EC2_USER', defaultValue: 'ubuntu', description: 'EC2 SSH Username')
         string(name: 'PEM_DIR', defaultValue: 'C:\\Users\\Administrator\\Desktop\\ec2', description: 'Local directory on agent containing the PEM key')
         string(name: 'PEM_FILE', defaultValue: 'testubuntu.pem', description: 'SSH Private Key filename')
@@ -15,16 +16,17 @@ pipeline {
     }
 
     environment {
-        AWS_REGION      = "${params.AWS_REGION}"
-        AWS_ACCOUNT_ID  = "${params.AWS_ACCOUNT_ID}"
-        ECR_REPO_NAME   = "${params.ECR_REPO_NAME}"
-        IMAGE_TAG       = "${params.IMAGE_TAG}"
-        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        FULL_IMAGE_NAME = "${ECR_REGISTRY}/${ECR_REPO_NAME}:${IMAGE_TAG}"
-        EC2_HOST        = "${params.EC2_HOST}"
-        EC2_USER        = "${params.EC2_USER}"
-        PEM_DIR         = "${params.PEM_DIR}"
-        PEM_FILE        = "${params.PEM_FILE}"
+        AWS_REGION                  = "${params.AWS_REGION}"
+        AWS_ACCOUNT_ID              = "${params.AWS_ACCOUNT_ID}"
+        ECR_REPO_NAME               = "${params.ECR_REPO_NAME}"
+        IMAGE_TAG                   = "${params.IMAGE_TAG}"
+        ECR_REGISTRY                = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        FULL_IMAGE_NAME             = "${ECR_REGISTRY}/${ECR_REPO_NAME}:${IMAGE_TAG}"
+        TARGET_GROUP_NAME           = "${params.TARGET_GROUP_NAME}"
+        FALLBACK_EC2_HOSTS          = "${params.FALLBACK_EC2_HOSTS}"
+        EC2_USER                    = "${params.EC2_USER}"
+        PEM_DIR                     = "${params.PEM_DIR}"
+        PEM_FILE                    = "${params.PEM_FILE}"
         CONTAINER_NAME              = "${params.CONTAINER_NAME}"
         COMPOSE_SERVICE             = "${params.COMPOSE_SERVICE}"
         AWS_SHARED_CREDENTIALS_FILE = 'C:\\Users\\Administrator\\.aws\\credentials'
@@ -82,23 +84,23 @@ pipeline {
         }
 
         // =====================================================================
-        // Stage 4: Pull image from ECR to EC2 and run for this image only
+        // Stage 4: Pull image from ECR to all Target Group instances and run
         // =====================================================================
         stage('Pull the image from ECR to the EC2 instance and run') {
             steps {
-                echo "=== Stage 4: Deploying to EC2 (${EC2_HOST}) ==="
+                echo "=== Stage 4: Deploying to all instances in Target Group: ${TARGET_GROUP_NAME} ==="
                 script {
                     // Create remote deployment script dynamically
                     writeFile file: 'deploy_remote.sh', text: """#!/bin/bash
 set -e
 
-echo "=== [EC2] Logging in to Amazon ECR ==="
+echo "=== [EC2 \$(hostname)] Logging in to Amazon ECR ==="
 aws ecr get-login-password --region ${AWS_REGION} | sudo docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-echo "=== [EC2] Pulling latest image: ${FULL_IMAGE_NAME} ==="
+echo "=== [EC2 \$(hostname)] Pulling latest image: ${FULL_IMAGE_NAME} ==="
 sudo docker pull ${FULL_IMAGE_NAME}
 
-echo "=== [EC2] Stopping running container if active ==="
+echo "=== [EC2 \$(hostname)] Stopping running container if active ==="
 if [ \$(sudo docker ps -q -f name=${CONTAINER_NAME}) ]; then
     echo "Stopping container ${CONTAINER_NAME}..."
     sudo docker stop ${CONTAINER_NAME}
@@ -109,13 +111,13 @@ if [ \$(sudo docker ps -aq -f name=${CONTAINER_NAME}) ]; then
     sudo docker rm ${CONTAINER_NAME}
 fi
 
-echo "=== [EC2] Deleting old image ==="
+echo "=== [EC2 \$(hostname)] Deleting old image ==="
 sudo docker rmi -f ${FULL_IMAGE_NAME} 2>/dev/null || true
 
-echo "=== [EC2] Taking latest image from ECR ==="
+echo "=== [EC2 \$(hostname)] Taking latest image from ECR ==="
 sudo docker pull ${FULL_IMAGE_NAME}
 
-echo "=== [EC2] Running docker compose for ${COMPOSE_SERVICE} service only ==="
+echo "=== [EC2 \$(hostname)] Running docker compose for ${COMPOSE_SERVICE} service only ==="
 cd /home/ubuntu
 if command -v docker-compose >/dev/null 2>&1; then
     sudo docker-compose up -d --no-deps ${COMPOSE_SERVICE}
@@ -126,27 +128,119 @@ else
     sudo docker run -d --name ${CONTAINER_NAME} -p 80:80 --restart unless-stopped ${FULL_IMAGE_NAME}
 fi
 
-echo "=== [EC2] Deployment status ==="
+echo "=== [EC2 \$(hostname)] Deployment status ==="
 sudo docker ps --filter name=${CONTAINER_NAME}
+"""
+
+                    // Create Target Group discovery and deployment script for Windows agent
+                    writeFile file: 'deploy_all_instances.ps1', text: """
+\$ErrorActionPreference = "Stop"
+\$env:AWS_SHARED_CREDENTIALS_FILE = "C:\\Users\\Administrator\\.aws\\credentials"
+\$env:AWS_CONFIG_FILE = "C:\\Users\\Administrator\\.aws\\config"
+\$env:USERPROFILE = "C:\\Users\\Administrator"
+\$env:HOME = "C:\\Users\\Administrator"
+
+Write-Host "=========================================================="
+Write-Host "Discovering target instances for Target Group: \$env:TARGET_GROUP_NAME"
+Write-Host "=========================================================="
+
+# 1. Enforce strict private key permissions for OpenSSH
+\$pemPath = Join-Path \$env:PEM_DIR \$env:PEM_FILE
+Write-Host "Enforcing strict NTFS permissions on: \$pemPath"
+& icacls \$pemPath /inheritance:r | Out-Null
+& icacls \$pemPath /remove "BUILTIN\\Administrators" 2>\$null | Out-Null
+& icacls \$pemPath /remove "A676FB5C1672570\\Administrator" 2>\$null | Out-Null
+& icacls \$pemPath /remove "Administrator" 2>\$null | Out-Null
+& icacls \$pemPath /grant:r "\$(\$env:USERNAME):R" | Out-Null
+& icacls \$pemPath /grant:r "SYSTEM:R" | Out-Null
+
+# 2. Query Target Group instances from AWS ELB
+\$targetHosts = [System.Collections.Generic.List[string]]::new()
+
+Write-Host "Querying Target Group: \$env:TARGET_GROUP_NAME via AWS CLI..."
+try {
+    \$tgArnRaw = & aws elbv2 describe-target-groups --names \$env:TARGET_GROUP_NAME --region \$env:AWS_REGION --query "TargetGroups[0].TargetGroupArn" --output text 2>&1
+    \$tgArn = "\$tgArnRaw".Trim()
+
+    if (\$LASTEXITCODE -eq 0 -and \$tgArn -and \$tgArn -ne "None" -and (-not \$tgArn.StartsWith("aws:"))) {
+        Write-Host "Target Group ARN found: \$tgArn"
+        \$instanceIdsRaw = & aws elbv2 describe-target-health --target-group-arn \$tgArn --region \$env:AWS_REGION --query "TargetHealthDescriptions[*].Target.Id" --output text 2>&1
+        \$instanceIds = "\$instanceIdsRaw".Trim()
+
+        if (\$LASTEXITCODE -eq 0 -and \$instanceIds -and (-not \$instanceIds.StartsWith("aws:"))) {
+            \$idsList = \$instanceIds -split '\\s+' | Where-Object { \$_ -ne "" }
+            Write-Host "Discovered \$(\$idsList.Count) instance ID(s) in Target Group: \$(\$idsList -join ', ')"
+
+            foreach (\$instId in \$idsList) {
+                \$dns = (& aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query "Reservations[0].Instances[0].PublicDnsName" --output text 2>&1).Trim()
+                \$ip = (& aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query "Reservations[0].Instances[0].PublicIpAddress" --output text 2>&1).Trim()
+
+                \$selectedHost = if (\$dns -and \$dns -ne "None" -and (-not \$dns.StartsWith("aws:"))) { \$dns } elseif (\$ip -and \$ip -ne "None" -and (-not \$ip.StartsWith("aws:"))) { \$ip } else { \$null }
+
+                if (\$selectedHost) {
+                    Write-Host "  -> Instance \$instId resolved to: \$selectedHost"
+                    \$targetHosts.Add(\$selectedHost)
+                } else {
+                    Write-Warning "Could not resolve public DNS/IP for instance \$instId"
+                }
+            }
+        }
+    } else {
+        Write-Warning "Target Group discovery note: \$tgArnRaw"
+    }
+} catch {
+    Write-Warning "Exception during Target Group discovery: \$_"
+}
+
+# 3. Fallback hosts if auto-discovery cannot be queried
+if (\$targetHosts.Count -eq 0) {
+    Write-Host "Auto-discovery returned 0 hosts. Using configured FALLBACK_EC2_HOSTS: \$env:FALLBACK_EC2_HOSTS"
+    if (\$env:FALLBACK_EC2_HOSTS) {
+        \$fallbackList = \$env:FALLBACK_EC2_HOSTS -split ',' | ForEach-Object { \$_.Trim() } | Where-Object { \$_ -ne "" }
+        foreach (\$h in \$fallbackList) {
+            \$targetHosts.Add(\$h)
+        }
+    }
+}
+
+if (\$targetHosts.Count -eq 0) {
+    Write-Error "No target instances found to deploy to!"
+    exit 1
+}
+
+Write-Host "Total instances to deploy: \$(\$targetHosts.Count) (\$(\$targetHosts -join ', '))"
+
+# 4. Deploy sequentially to each target instance
+\$remoteScript = "\$env:WORKSPACE\\deploy_remote.sh"
+Set-Location \$env:PEM_DIR
+
+\$idx = 1
+foreach (\$hostEntry in \$targetHosts) {
+    Write-Host ""
+    Write-Host "=========================================================="
+    Write-Host "[\$idx/\$(\$targetHosts.Count)] Deploying to target: \$hostEntry"
+    Write-Host "=========================================================="
+
+    cmd.exe /c "ssh -i `"\$env:PEM_FILE`" -o StrictHostKeyChecking=no \$env:EC2_USER@\$hostEntry < `"\$remoteScript`""
+    if (\$LASTEXITCODE -ne 0) {
+        Write-Error "Deployment failed on \$hostEntry with exit code \$LASTEXITCODE"
+        exit \$LASTEXITCODE
+    }
+    Write-Host "[\$idx/\$(\$targetHosts.Count)] Successfully deployed to \$hostEntry!"
+    \$idx++
+}
+
+Write-Host ""
+Write-Host "=========================================================="
+Write-Host "All \$(\$targetHosts.Count) instance(s) in \$env:TARGET_GROUP_NAME successfully updated!"
+Write-Host "=========================================================="
 """
                 }
 
                 bat """
                     @echo off
-                    echo Changing directory to ${PEM_DIR}...
-                    cd /d "${PEM_DIR}"
-
-                    echo Enforcing strict private key permissions for OpenSSH...
-                    icacls "${PEM_FILE}" /inheritance:r
-                    icacls "${PEM_FILE}" /remove "BUILTIN\\Administrators" 2>nul
-                    icacls "${PEM_FILE}" /remove "A676FB5C1672570\\Administrator" 2>nul
-                    icacls "${PEM_FILE}" /remove "Administrator" 2>nul
-                    icacls "${PEM_FILE}" /grant:r "%USERNAME%:R"
-                    icacls "${PEM_FILE}" /grant:r "SYSTEM:R"
-                    icacls "${PEM_FILE}"
-
-                    echo Connecting to ${EC2_USER}@${EC2_HOST} using ${PEM_FILE}...
-                    ssh -i "${PEM_FILE}" -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} < "%WORKSPACE%\\deploy_remote.sh"
+                    echo Running multi-instance deployment for Target Group %TARGET_GROUP_NAME%...
+                    powershell -ExecutionPolicy Bypass -File "%WORKSPACE%\\deploy_all_instances.ps1"
                 """
             }
         }
@@ -157,6 +251,7 @@ sudo docker ps --filter name=${CONTAINER_NAME}
             bat """
                 @echo off
                 if exist deploy_remote.sh del /f /q deploy_remote.sh
+                if exist deploy_all_instances.ps1 del /f /q deploy_all_instances.ps1
                 cd /d "${PEM_DIR}"
                 icacls "${PEM_FILE}" /grant:r "Administrator:(F)" 2>nul
             """
@@ -172,6 +267,7 @@ Project: ${JOB_NAME}
 Build: #${BUILD_NUMBER}
 Status: SUCCESS
 Build URL: ${BUILD_URL}
+Target Group: ${TARGET_GROUP_NAME}
 """
             )
         }
@@ -187,6 +283,7 @@ Project: ${JOB_NAME}
 Build: #${BUILD_NUMBER}
 Status: FAILURE
 Build URL: ${BUILD_URL}
+Target Group: ${TARGET_GROUP_NAME}
 """
             )
         }
