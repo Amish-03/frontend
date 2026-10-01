@@ -135,6 +135,16 @@ sudo docker ps --filter name=${CONTAINER_NAME}
                     @echo off
                     echo Changing directory to ${PEM_DIR}...
                     cd /d "${PEM_DIR}"
+
+                    echo Enforcing strict private key permissions for OpenSSH...
+                    icacls "${PEM_FILE}" /inheritance:r
+                    icacls "${PEM_FILE}" /remove "BUILTIN\\Administrators" 2>nul
+                    icacls "${PEM_FILE}" /remove "A676FB5C1672570\\Administrator" 2>nul
+                    icacls "${PEM_FILE}" /remove "Administrator" 2>nul
+                    icacls "${PEM_FILE}" /grant:r "%USERNAME%:R"
+                    icacls "${PEM_FILE}" /grant:r "SYSTEM:R"
+                    icacls "${PEM_FILE}"
+
                     echo Connecting to ${EC2_USER}@${EC2_HOST} using ${PEM_FILE}...
                     ssh -i "${PEM_FILE}" -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} < "%WORKSPACE%\\deploy_remote.sh"
                 """
@@ -142,7 +152,15 @@ sudo docker ps --filter name=${CONTAINER_NAME}
         }
     }
 
-     post {
+    post {
+        always {
+            bat """
+                @echo off
+                if exist deploy_remote.sh del /f /q deploy_remote.sh
+                cd /d "${PEM_DIR}"
+                icacls "${PEM_FILE}" /grant:r "Administrator:(F)" 2>nul
+            """
+        }
         success {
             mail(
                 to: 'amishkulkarni03@gmail.com',
