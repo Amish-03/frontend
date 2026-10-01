@@ -7,7 +7,6 @@ pipeline {
         string(name: 'ECR_REPO_NAME', defaultValue: 'amish', description: 'ECR Repository Name')
         string(name: 'IMAGE_TAG', defaultValue: 'frontend', description: 'Docker Image Tag')
         string(name: 'TARGET_GROUP_NAME', defaultValue: 'TargetGroup-1', description: 'AWS ELB Target Group Name to discover instances from')
-        string(name: 'FALLBACK_EC2_HOSTS', defaultValue: 'ec2-35-171-225-161.compute-1.amazonaws.com,ec2-100-48-207-3.compute-1.amazonaws.com', description: 'Comma-separated fallback EC2 hostnames if auto-discovery cannot be queried')
         string(name: 'EC2_USER', defaultValue: 'ubuntu', description: 'EC2 SSH Username')
         string(name: 'PEM_DIR', defaultValue: 'C:\\Users\\Administrator\\Desktop\\ec2', description: 'Local directory on agent containing the PEM key')
         string(name: 'PEM_FILE', defaultValue: 'testubuntu.pem', description: 'SSH Private Key filename')
@@ -23,7 +22,6 @@ pipeline {
         ECR_REGISTRY                = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         FULL_IMAGE_NAME             = "${ECR_REGISTRY}/${ECR_REPO_NAME}:${IMAGE_TAG}"
         TARGET_GROUP_NAME           = "${params.TARGET_GROUP_NAME}"
-        FALLBACK_EC2_HOSTS          = "${params.FALLBACK_EC2_HOSTS}"
         EC2_USER                    = "${params.EC2_USER}"
         PEM_DIR                     = "${params.PEM_DIR}"
         PEM_FILE                    = "${params.PEM_FILE}"
@@ -88,7 +86,7 @@ pipeline {
         // =====================================================================
         stage('Pull the image from ECR to the EC2 instance and run') {
             steps {
-                echo "=== Stage 4: Deploying to all instances in Target Group: ${TARGET_GROUP_NAME} ==="
+                echo "=== Stage 4: Querying Target Group ${TARGET_GROUP_NAME} from AWS and deploying to all instances ==="
                 script {
                     // Create remote deployment script dynamically
                     writeFile file: 'deploy_remote.sh', text: """#!/bin/bash
@@ -141,7 +139,7 @@ sudo docker ps --filter name=${CONTAINER_NAME}
 \$env:HOME = "C:\\Users\\Administrator"
 
 Write-Host "=========================================================="
-Write-Host "Discovering target instances for Target Group: \$env:TARGET_GROUP_NAME"
+Write-Host "Discovering target instances dynamically from AWS Target Group: \$env:TARGET_GROUP_NAME"
 Write-Host "=========================================================="
 
 # 1. Enforce strict private key permissions for OpenSSH
@@ -154,71 +152,67 @@ Write-Host "Enforcing strict NTFS permissions on: \$pemPath"
 & icacls \$pemPath /grant:r "\$(\$env:USERNAME):R" | Out-Null
 & icacls \$pemPath /grant:r "SYSTEM:R" | Out-Null
 
-# 2. Query Target Group instances from AWS ELB
+# 2. Query Target Group ARN from AWS ELB
 \$targetHosts = [System.Collections.Generic.List[string]]::new()
 
 Write-Host "Querying Target Group: \$env:TARGET_GROUP_NAME via AWS CLI..."
-try {
-    \$prevEAP = \$ErrorActionPreference
-    \$ErrorActionPreference = "Continue"
+\$tgCmdOut = cmd.exe /c "aws elbv2 describe-target-groups --names \$env:TARGET_GROUP_NAME --region \$env:AWS_REGION --query `"TargetGroups[0].TargetGroupArn`" --output text 2>&1"
+\$tgArn = if (\$tgCmdOut) { "\$tgCmdOut".Trim() } else { "" }
 
-    \$tgCmdOut = cmd.exe /c "aws elbv2 describe-target-groups --names \$env:TARGET_GROUP_NAME --region \$env:AWS_REGION --query `"TargetGroups[0].TargetGroupArn`" --output text 2>nul"
-    \$tgArn = if (\$tgCmdOut) { "\$tgCmdOut".Trim() } else { "" }
-
-    if (\$tgArn -and \$tgArn -ne "None" -and (-not \$tgArn.StartsWith("aws:"))) {
-        Write-Host "Target Group ARN found: \$tgArn"
-        \$instCmdOut = cmd.exe /c "aws elbv2 describe-target-health --target-group-arn \$tgArn --region \$env:AWS_REGION --query `"TargetHealthDescriptions[*].Target.Id`" --output text 2>nul"
-        \$instanceIds = if (\$instCmdOut) { "\$instCmdOut".Trim() } else { "" }
-
-        if (\$instanceIds -and (-not \$instanceIds.StartsWith("aws:"))) {
-            \$idsList = \$instanceIds -split '\\s+' | Where-Object { \$_ -ne "" }
-            Write-Host "Discovered \$(\$idsList.Count) instance ID(s) in Target Group: \$(\$idsList -join ', ')"
-
-            foreach (\$instId in \$idsList) {
-                \$dnsOut = cmd.exe /c "aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query `"Reservations[0].Instances[0].PublicDnsName`" --output text 2>nul"
-                \$dns = if (\$dnsOut) { "\$dnsOut".Trim() } else { "" }
-                \$ipOut = cmd.exe /c "aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query `"Reservations[0].Instances[0].PublicIpAddress`" --output text 2>nul"
-                \$ip = if (\$ipOut) { "\$ipOut".Trim() } else { "" }
-
-                \$selectedHost = if (\$dns -and \$dns -ne "None" -and (-not \$dns.StartsWith("aws:"))) { \$dns } elseif (\$ip -and \$ip -ne "None" -and (-not \$ip.StartsWith("aws:"))) { \$ip } else { \$null }
-
-                if (\$selectedHost) {
-                    Write-Host "  -> Instance \$instId resolved to: \$selectedHost"
-                    if (-not \$targetHosts.Contains(\$selectedHost)) {
-                        \$targetHosts.Add(\$selectedHost)
-                    }
-                } else {
-                    Write-Warning "Could not resolve public DNS/IP for instance \$instId"
-                }
-            }
-        }
-    } else {
-        Write-Warning "Target Group auto-discovery note: Unable to query Target Group '\$env:TARGET_GROUP_NAME' directly via AWS CLI (current IAM credentials lack elasticloadbalancing/ec2 Describe permissions)."
-    }
-    \$ErrorActionPreference = \$prevEAP
-} catch {
-    Write-Warning "Exception during Target Group discovery: \$_"
-}
-
-# 3. Fallback hosts if auto-discovery cannot be queried
-if (\$targetHosts.Count -eq 0) {
-    Write-Host "Auto-discovery returned 0 hosts. Using configured FALLBACK_EC2_HOSTS: \$env:FALLBACK_EC2_HOSTS"
-    if (\$env:FALLBACK_EC2_HOSTS) {
-        \$fallbackList = \$env:FALLBACK_EC2_HOSTS -split ',' | ForEach-Object { \$_.Trim() } | Where-Object { \$_ -ne "" }
-        foreach (\$h in \$fallbackList) {
-            if (-not \$targetHosts.Contains(\$h)) {
-                \$targetHosts.Add(\$h)
-            }
-        }
-    }
-}
-
-if (\$targetHosts.Count -eq 0) {
-    Write-Error "No target instances found to deploy to!"
+if (\$LASTEXITCODE -ne 0 -or (-not \$tgArn) -or \$tgArn -eq "None" -or \$tgArn.StartsWith("aws:") -or \$tgArn.Contains("error") -or \$tgArn.Contains("Error") -or \$tgArn.Contains("AccessDenied")) {
+    Write-Error "Failed to query Target Group '\$env:TARGET_GROUP_NAME' from AWS: `n\$tgArn`n`nPlease ensure your AWS IAM credentials have 'elasticloadbalancing:DescribeTargetGroups' permission."
     exit 1
 }
 
-Write-Host "Total instances to deploy: \$(\$targetHosts.Count) (\$(\$targetHosts -join ', '))"
+Write-Host "Target Group ARN found: \$tgArn"
+
+# 3. Query all registered target instances from the Target Group
+Write-Host "Querying registered target instances in Target Group from AWS ELB..."
+\$instCmdOut = cmd.exe /c "aws elbv2 describe-target-health --target-group-arn `"\$tgArn`" --region \$env:AWS_REGION --query `"TargetHealthDescriptions[*].Target.Id`" --output text 2>&1"
+\$instanceIds = if (\$instCmdOut) { "\$instCmdOut".Trim() } else { "" }
+
+if (\$LASTEXITCODE -ne 0 -or (-not \$instanceIds) -or \$instanceIds -eq "None" -or \$instanceIds.StartsWith("aws:") -or \$instanceIds.Contains("error") -or \$instanceIds.Contains("Error") -or \$instanceIds.Contains("AccessDenied")) {
+    Write-Error "Failed to describe target health for Target Group '\$tgArn': `n\$instanceIds`n`nPlease ensure your AWS IAM credentials have 'elasticloadbalancing:DescribeTargetHealth' permission."
+    exit 1
+}
+
+\$idsList = \$instanceIds -split '\\s+' | Where-Object { \$_ -ne "" }
+Write-Host "Discovered \$(\$idsList.Count) instance ID(s) dynamically registered in Target Group: \$(\$idsList -join ', ')"
+
+if (\$idsList.Count -eq 0) {
+    Write-Error "No instances registered in Target Group '\$env:TARGET_GROUP_NAME'!"
+    exit 1
+}
+
+# 4. Resolve public DNS or public IP for each instance dynamically
+foreach (\$instId in \$idsList) {
+    Write-Host "Resolving public endpoint for instance \$instId via EC2 describe-instances..."
+    \$dnsOut = cmd.exe /c "aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query `"Reservations[0].Instances[0].PublicDnsName`" --output text 2>&1"
+    \$dns = if (\$dnsOut) { "\$dnsOut".Trim() } else { "" }
+
+    \$ipOut = cmd.exe /c "aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query `"Reservations[0].Instances[0].PublicIpAddress`" --output text 2>&1"
+    \$ip = if (\$ipOut) { "\$ipOut".Trim() } else { "" }
+
+    \$selectedHost = if (\$dns -and \$dns -ne "None" -and (-not \$dns.StartsWith("aws:")) -and (-not \$dns.Contains("error"))) {
+        \$dns
+    } elseif (\$ip -and \$ip -ne "None" -and (-not \$ip.StartsWith("aws:")) -and (-not \$ip.Contains("error"))) {
+        \$ip
+    } else {
+        \$null
+    }
+
+    if (\$selectedHost) {
+        Write-Host "  -> Instance \$instId dynamically resolved to: \$selectedHost"
+        if (-not \$targetHosts.Contains(\$selectedHost)) {
+            \$targetHosts.Add(\$selectedHost)
+        }
+    } else {
+        Write-Error "Could not resolve public DNS/IP for instance \$instId: `nDNS Query: \$dnsOut `nIP Query: \$ipOut`n`nPlease ensure your AWS IAM credentials have 'ec2:DescribeInstances' permission."
+        exit 1
+    }
+}
+
+Write-Host "Total dynamically discovered instances to deploy: \$(\$targetHosts.Count) (\$(\$targetHosts -join ', '))"
 
 # 4. Deploy sequentially to each target instance
 \$remoteScript = "\$env:WORKSPACE\\deploy_remote.sh"
