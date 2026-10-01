@@ -6,6 +6,7 @@ pipeline {
         string(name: 'AWS_ACCOUNT_ID', defaultValue: '888577028066', description: 'AWS Account ID for Amazon ECR')
         string(name: 'ECR_REPO_NAME', defaultValue: 'amish', description: 'ECR Repository Name')
         string(name: 'IMAGE_TAG', defaultValue: 'frontend', description: 'Docker Image Tag')
+        string(name: 'AWS_CREDENTIALS_HOME', defaultValue: 'C:\\Users\\Administrator', description: 'Home directory containing the .aws CLI profile for the Jenkins agent fallback')
         string(name: 'EC2_HOST', defaultValue: 'ec2-35-171-225-161.compute-1.amazonaws.com', description: 'EC2 Public DNS or IP')
         string(name: 'EC2_USER', defaultValue: 'ubuntu', description: 'EC2 SSH Username')
         string(name: 'PEM_DIR', defaultValue: 'C:\\Users\\Administrator\\Desktop\\ec2', description: 'Local directory on agent containing the PEM key')
@@ -19,6 +20,7 @@ pipeline {
         AWS_ACCOUNT_ID  = "${params.AWS_ACCOUNT_ID}"
         ECR_REPO_NAME   = "${params.ECR_REPO_NAME}"
         IMAGE_TAG       = "${params.IMAGE_TAG}"
+        AWS_CREDENTIALS_HOME = "${params.AWS_CREDENTIALS_HOME}"
         ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         FULL_IMAGE_NAME = "${ECR_REGISTRY}/${ECR_REPO_NAME}:${IMAGE_TAG}"
         EC2_HOST        = "${params.EC2_HOST}"
@@ -63,18 +65,29 @@ pipeline {
                 echo '=== Stage 3: Validating AWS credentials on the Jenkins agent ==='
                 bat '''
                     @echo off
+                    set "AWS_SHARED_CREDENTIALS_FILE=%AWS_CREDENTIALS_HOME%\\.aws\\credentials"
+                    set "AWS_CONFIG_FILE=%AWS_CREDENTIALS_HOME%\\.aws\\config"
+
                     if "%AWS_ACCESS_KEY_ID%"=="" (
-                        echo ERROR: AWS_ACCESS_KEY_ID is not set.
-                        exit /b 1
+                        if exist "%AWS_SHARED_CREDENTIALS_FILE%" (
+                            echo AWS_ACCESS_KEY_ID not set. Falling back to AWS CLI profile at %AWS_SHARED_CREDENTIALS_FILE%.
+                            set "USERPROFILE=%AWS_CREDENTIALS_HOME%"
+                            set "HOME=%AWS_CREDENTIALS_HOME%"
+                        ) else (
+                            echo ERROR: AWS_ACCESS_KEY_ID is not set and no AWS CLI credentials file was found at %AWS_SHARED_CREDENTIALS_FILE%.
+                            exit /b 1
+                        )
                     )
-                    if "%AWS_SECRET_ACCESS_KEY%"=="" (
+                    if not "%AWS_ACCESS_KEY_ID%"=="" if "%AWS_SECRET_ACCESS_KEY%"=="" (
                         echo ERROR: AWS_SECRET_ACCESS_KEY is not set.
                         exit /b 1
                     )
                     if not "%AWS_SESSION_TOKEN%"=="" (
                         echo AWS_SESSION_TOKEN detected. Using temporary STS credentials.
-                    ) else (
+                    ) else if not "%AWS_ACCESS_KEY_ID%"=="" (
                         echo AWS_SESSION_TOKEN not set. Assuming long-lived IAM user credentials.
+                    ) else (
+                        echo AWS_SESSION_TOKEN will be resolved from the AWS CLI profile if required.
                     )
                     aws sts get-caller-identity --region %AWS_REGION%
                 '''
@@ -89,6 +102,12 @@ pipeline {
                 echo "=== Stage 4: Authenticating with ECR and pushing ${FULL_IMAGE_NAME} ==="
                 bat """
                     @echo off
+                    if "%AWS_ACCESS_KEY_ID%"=="" (
+                        set "USERPROFILE=${AWS_CREDENTIALS_HOME}"
+                        set "HOME=${AWS_CREDENTIALS_HOME}"
+                        set "AWS_SHARED_CREDENTIALS_FILE=${AWS_CREDENTIALS_HOME}\\.aws\\credentials"
+                        set "AWS_CONFIG_FILE=${AWS_CREDENTIALS_HOME}\\.aws\\config"
+                    )
                     echo Logging into Amazon ECR...
                     aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
                     echo Pushing ${FULL_IMAGE_NAME} to ECR...
