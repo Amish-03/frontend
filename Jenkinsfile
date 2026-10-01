@@ -25,8 +25,12 @@ pipeline {
         EC2_USER        = "${params.EC2_USER}"
         PEM_DIR         = "${params.PEM_DIR}"
         PEM_FILE        = "${params.PEM_FILE}"
-        CONTAINER_NAME  = "${params.CONTAINER_NAME}"
-        COMPOSE_SERVICE = "${params.COMPOSE_SERVICE}"
+        CONTAINER_NAME              = "${params.CONTAINER_NAME}"
+        COMPOSE_SERVICE             = "${params.COMPOSE_SERVICE}"
+        AWS_SHARED_CREDENTIALS_FILE = 'C:\\Users\\Administrator\\.aws\\credentials'
+        AWS_CONFIG_FILE             = 'C:\\Users\\Administrator\\.aws\\config'
+        USERPROFILE                 = 'C:\\Users\\Administrator'
+        HOME                        = 'C:\\Users\\Administrator'
     }
 
     stages {
@@ -62,7 +66,16 @@ pipeline {
             steps {
                 echo "=== Stage 3: Authenticating with ECR and pushing ${FULL_IMAGE_NAME} ==="
                 bat """
+                    @echo off
+                    echo Switching directory to ${PEM_DIR}...
+                    cd /d "${PEM_DIR}"
+                    set "AWS_SHARED_CREDENTIALS_FILE=C:\\Users\\Administrator\\.aws\\credentials"
+                    set "AWS_CONFIG_FILE=C:\\Users\\Administrator\\.aws\\config"
+                    set "USERPROFILE=C:\\Users\\Administrator"
+                    set "HOME=C:\\Users\\Administrator"
+                    echo Logging into Amazon ECR...
                     aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                    echo Pushing ${FULL_IMAGE_NAME} to ECR...
                     docker push ${FULL_IMAGE_NAME}
                 """
             }
