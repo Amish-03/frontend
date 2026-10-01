@@ -7,7 +7,7 @@ pipeline {
         string(name: 'ECR_REPO_NAME', defaultValue: 'amish', description: 'ECR Repository Name')
         string(name: 'IMAGE_TAG', defaultValue: 'frontend', description: 'Docker Image Tag')
         string(name: 'TARGET_GROUP_NAME', defaultValue: 'TargetGroup-1', description: 'AWS ELB Target Group Name to discover instances from')
-        string(name: 'FALLBACK_EC2_HOSTS', defaultValue: 'ec2-35-171-225-161.compute-1.amazonaws.com', description: 'Comma-separated fallback EC2 hostnames if auto-discovery cannot be queried')
+        string(name: 'FALLBACK_EC2_HOSTS', defaultValue: 'ec2-35-171-225-161.compute-1.amazonaws.com,ec2-100-48-207-3.compute-1.amazonaws.com', description: 'Comma-separated fallback EC2 hostnames if auto-discovery cannot be queried')
         string(name: 'EC2_USER', defaultValue: 'ubuntu', description: 'EC2 SSH Username')
         string(name: 'PEM_DIR', defaultValue: 'C:\\Users\\Administrator\\Desktop\\ec2', description: 'Local directory on agent containing the PEM key')
         string(name: 'PEM_FILE', defaultValue: 'testubuntu.pem', description: 'SSH Private Key filename')
@@ -159,35 +159,43 @@ Write-Host "Enforcing strict NTFS permissions on: \$pemPath"
 
 Write-Host "Querying Target Group: \$env:TARGET_GROUP_NAME via AWS CLI..."
 try {
-    \$tgArnRaw = & aws elbv2 describe-target-groups --names \$env:TARGET_GROUP_NAME --region \$env:AWS_REGION --query "TargetGroups[0].TargetGroupArn" --output text 2>&1
-    \$tgArn = "\$tgArnRaw".Trim()
+    \$prevEAP = \$ErrorActionPreference
+    \$ErrorActionPreference = "Continue"
 
-    if (\$LASTEXITCODE -eq 0 -and \$tgArn -and \$tgArn -ne "None" -and (-not \$tgArn.StartsWith("aws:"))) {
+    \$tgCmdOut = cmd.exe /c "aws elbv2 describe-target-groups --names \$env:TARGET_GROUP_NAME --region \$env:AWS_REGION --query `"TargetGroups[0].TargetGroupArn`" --output text 2>nul"
+    \$tgArn = if (\$tgCmdOut) { "\$tgCmdOut".Trim() } else { "" }
+
+    if (\$tgArn -and \$tgArn -ne "None" -and (-not \$tgArn.StartsWith("aws:"))) {
         Write-Host "Target Group ARN found: \$tgArn"
-        \$instanceIdsRaw = & aws elbv2 describe-target-health --target-group-arn \$tgArn --region \$env:AWS_REGION --query "TargetHealthDescriptions[*].Target.Id" --output text 2>&1
-        \$instanceIds = "\$instanceIdsRaw".Trim()
+        \$instCmdOut = cmd.exe /c "aws elbv2 describe-target-health --target-group-arn \$tgArn --region \$env:AWS_REGION --query `"TargetHealthDescriptions[*].Target.Id`" --output text 2>nul"
+        \$instanceIds = if (\$instCmdOut) { "\$instCmdOut".Trim() } else { "" }
 
-        if (\$LASTEXITCODE -eq 0 -and \$instanceIds -and (-not \$instanceIds.StartsWith("aws:"))) {
+        if (\$instanceIds -and (-not \$instanceIds.StartsWith("aws:"))) {
             \$idsList = \$instanceIds -split '\\s+' | Where-Object { \$_ -ne "" }
             Write-Host "Discovered \$(\$idsList.Count) instance ID(s) in Target Group: \$(\$idsList -join ', ')"
 
             foreach (\$instId in \$idsList) {
-                \$dns = (& aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query "Reservations[0].Instances[0].PublicDnsName" --output text 2>&1).Trim()
-                \$ip = (& aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query "Reservations[0].Instances[0].PublicIpAddress" --output text 2>&1).Trim()
+                \$dnsOut = cmd.exe /c "aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query `"Reservations[0].Instances[0].PublicDnsName`" --output text 2>nul"
+                \$dns = if (\$dnsOut) { "\$dnsOut".Trim() } else { "" }
+                \$ipOut = cmd.exe /c "aws ec2 describe-instances --instance-ids \$instId --region \$env:AWS_REGION --query `"Reservations[0].Instances[0].PublicIpAddress`" --output text 2>nul"
+                \$ip = if (\$ipOut) { "\$ipOut".Trim() } else { "" }
 
                 \$selectedHost = if (\$dns -and \$dns -ne "None" -and (-not \$dns.StartsWith("aws:"))) { \$dns } elseif (\$ip -and \$ip -ne "None" -and (-not \$ip.StartsWith("aws:"))) { \$ip } else { \$null }
 
                 if (\$selectedHost) {
                     Write-Host "  -> Instance \$instId resolved to: \$selectedHost"
-                    \$targetHosts.Add(\$selectedHost)
+                    if (-not \$targetHosts.Contains(\$selectedHost)) {
+                        \$targetHosts.Add(\$selectedHost)
+                    }
                 } else {
                     Write-Warning "Could not resolve public DNS/IP for instance \$instId"
                 }
             }
         }
     } else {
-        Write-Warning "Target Group discovery note: \$tgArnRaw"
+        Write-Warning "Target Group auto-discovery note: Unable to query Target Group '\$env:TARGET_GROUP_NAME' directly via AWS CLI (current IAM credentials lack elasticloadbalancing/ec2 Describe permissions)."
     }
+    \$ErrorActionPreference = \$prevEAP
 } catch {
     Write-Warning "Exception during Target Group discovery: \$_"
 }
@@ -198,7 +206,9 @@ if (\$targetHosts.Count -eq 0) {
     if (\$env:FALLBACK_EC2_HOSTS) {
         \$fallbackList = \$env:FALLBACK_EC2_HOSTS -split ',' | ForEach-Object { \$_.Trim() } | Where-Object { \$_ -ne "" }
         foreach (\$h in \$fallbackList) {
-            \$targetHosts.Add(\$h)
+            if (-not \$targetHosts.Contains(\$h)) {
+                \$targetHosts.Add(\$h)
+            }
         }
     }
 }
