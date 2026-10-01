@@ -160,7 +160,7 @@ Write-Host "Querying Target Group: \$env:TARGET_GROUP_NAME via AWS CLI..."
 \$tgArn = if (\$tgCmdOut) { "\$tgCmdOut".Trim() } else { "" }
 
 if (\$LASTEXITCODE -ne 0 -or (-not \$tgArn) -or \$tgArn -eq "None" -or \$tgArn.StartsWith("aws:") -or \$tgArn.Contains("error") -or \$tgArn.Contains("Error") -or \$tgArn.Contains("AccessDenied")) {
-    Write-Error "Failed to query Target Group '\$env:TARGET_GROUP_NAME' from AWS: `n\$tgArn`n`nPlease ensure your AWS IAM credentials have 'elasticloadbalancing:DescribeTargetGroups' permission."
+    Write-Error "Failed to query Target Group '\$env:TARGET_GROUP_NAME' from AWS - Details:`n\${tgArn}`n`nPlease ensure your AWS IAM credentials have 'elasticloadbalancing:DescribeTargetGroups' permission."
     exit 1
 }
 
@@ -172,7 +172,7 @@ Write-Host "Querying registered target instances in Target Group from AWS ELB...
 \$instanceIds = if (\$instCmdOut) { "\$instCmdOut".Trim() } else { "" }
 
 if (\$LASTEXITCODE -ne 0 -or (-not \$instanceIds) -or \$instanceIds -eq "None" -or \$instanceIds.StartsWith("aws:") -or \$instanceIds.Contains("error") -or \$instanceIds.Contains("Error") -or \$instanceIds.Contains("AccessDenied")) {
-    Write-Error "Failed to describe target health for Target Group '\$tgArn': `n\$instanceIds`n`nPlease ensure your AWS IAM credentials have 'elasticloadbalancing:DescribeTargetHealth' permission."
+    Write-Error "Failed to describe target health for Target Group '\${tgArn}' - Details:`n\${instanceIds}`n`nPlease ensure your AWS IAM credentials have 'elasticloadbalancing:DescribeTargetHealth' permission."
     exit 1
 }
 
@@ -202,12 +202,12 @@ foreach (\$instId in \$idsList) {
     }
 
     if (\$selectedHost) {
-        Write-Host "  -> Instance \$instId dynamically resolved to: \$selectedHost"
+        Write-Host "  -> Instance \${instId} dynamically resolved to: \${selectedHost}"
         if (-not \$targetHosts.Contains(\$selectedHost)) {
             \$targetHosts.Add(\$selectedHost)
         }
     } else {
-        Write-Error "Could not resolve public DNS/IP for instance \$instId: `nDNS Query: \$dnsOut `nIP Query: \$ipOut`n`nPlease ensure your AWS IAM credentials have 'ec2:DescribeInstances' permission."
+        Write-Error "Could not resolve public DNS/IP for instance \${instId} - Details:`nDNS Query: \${dnsOut}`nIP Query: \${ipOut}`n`nPlease ensure your AWS IAM credentials have 'ec2:DescribeInstances' permission."
         exit 1
     }
 }
@@ -223,17 +223,17 @@ Set-Location \$env:PEM_DIR
 foreach (\$hostEntry in \$targetHosts) {
     Write-Host ""
     Write-Host "=========================================================="
-    Write-Host "[\$idx/\$(\$targetHosts.Count)] Deploying to target: \$hostEntry"
+    Write-Host "[\${idx}/\$(\$targetHosts.Count)] Deploying to target: \${hostEntry}"
     Write-Host "=========================================================="
 
-    cmd.exe /c "ssh -i `"\$env:PEM_FILE`" -o StrictHostKeyChecking=no \$env:EC2_USER@\$hostEntry < `"\$remoteScript`""
+    cmd.exe /c "ssh -i `"\$env:PEM_FILE`" -o StrictHostKeyChecking=no \$env:EC2_USER@\${hostEntry} < `"\$remoteScript`""
     if (\$LASTEXITCODE -ne 0) {
-        Write-Error "Deployment failed on \$hostEntry with exit code \$LASTEXITCODE"
+        Write-Error "Deployment failed on \${hostEntry} with exit code \$LASTEXITCODE"
         exit \$LASTEXITCODE
     }
     \$timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    Write-Host "[\$idx/\$(\$targetHosts.Count)] Successfully deployed to \$hostEntry!"
-    \$deployedReport.Add("  * Instance #\$idx : \$hostEntry")
+    Write-Host "[\${idx}/\$(\$targetHosts.Count)] Successfully deployed to \${hostEntry}!"
+    \$deployedReport.Add("  * Instance #\${idx} : \${hostEntry}")
     \$deployedReport.Add("    - Status       : Image Pulled & Docker Compose Running")
     \$deployedReport.Add("    - Completed At : \$timestamp UTC")
     \$idx++
