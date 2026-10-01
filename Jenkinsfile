@@ -27,10 +27,6 @@ pipeline {
         PEM_FILE        = "${params.PEM_FILE}"
         CONTAINER_NAME              = "${params.CONTAINER_NAME}"
         COMPOSE_SERVICE             = "${params.COMPOSE_SERVICE}"
-        AWS_SHARED_CREDENTIALS_FILE = 'C:\\Users\\Administrator\\.aws\\credentials'
-        AWS_CONFIG_FILE             = 'C:\\Users\\Administrator\\.aws\\config'
-        USERPROFILE                 = 'C:\\Users\\Administrator'
-        HOME                        = 'C:\\Users\\Administrator'
     }
 
     stages {
@@ -60,19 +56,39 @@ pipeline {
         }
 
         // =====================================================================
+        // Stage 3: Validate AWS credentials on the Jenkins agent
+        // =====================================================================
+        stage('Validate AWS credentials') {
+            steps {
+                echo '=== Stage 3: Validating AWS credentials on the Jenkins agent ==='
+                bat '''
+                    @echo off
+                    if "%AWS_ACCESS_KEY_ID%"=="" (
+                        echo ERROR: AWS_ACCESS_KEY_ID is not set.
+                        exit /b 1
+                    )
+                    if "%AWS_SECRET_ACCESS_KEY%"=="" (
+                        echo ERROR: AWS_SECRET_ACCESS_KEY is not set.
+                        exit /b 1
+                    )
+                    if not "%AWS_SESSION_TOKEN%"=="" (
+                        echo AWS_SESSION_TOKEN detected. Using temporary STS credentials.
+                    ) else (
+                        echo AWS_SESSION_TOKEN not set. Assuming long-lived IAM user credentials.
+                    )
+                    aws sts get-caller-identity --region %AWS_REGION%
+                '''
+            }
+        }
+
+        // =====================================================================
         // Stage 3: Push the docker image to the ECR
         // =====================================================================
         stage('Push the docker image to the ECR') {
             steps {
-                echo "=== Stage 3: Authenticating with ECR and pushing ${FULL_IMAGE_NAME} ==="
+                echo "=== Stage 4: Authenticating with ECR and pushing ${FULL_IMAGE_NAME} ==="
                 bat """
                     @echo off
-                    echo Switching directory to ${PEM_DIR}...
-                    cd /d "${PEM_DIR}"
-                    set "AWS_SHARED_CREDENTIALS_FILE=C:\\Users\\Administrator\\.aws\\credentials"
-                    set "AWS_CONFIG_FILE=C:\\Users\\Administrator\\.aws\\config"
-                    set "USERPROFILE=C:\\Users\\Administrator"
-                    set "HOME=C:\\Users\\Administrator"
                     echo Logging into Amazon ECR...
                     aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
                     echo Pushing ${FULL_IMAGE_NAME} to ECR...
@@ -86,7 +102,7 @@ pipeline {
         // =====================================================================
         stage('Pull the image from ECR to the EC2 instance and run') {
             steps {
-                echo "=== Stage 4: Deploying to EC2 (${EC2_HOST}) ==="
+                echo "=== Stage 5: Deploying to EC2 (${EC2_HOST}) ==="
                 script {
                     // Create remote deployment script dynamically
                     writeFile file: 'deploy_remote.sh', text: """#!/bin/bash
