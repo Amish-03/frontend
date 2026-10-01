@@ -6,8 +6,7 @@ pipeline {
         string(name: 'AWS_ACCOUNT_ID', defaultValue: '888577028066', description: 'AWS Account ID for Amazon ECR')
         string(name: 'ECR_REPO_NAME', defaultValue: 'amish', description: 'ECR Repository Name')
         string(name: 'IMAGE_TAG', defaultValue: 'frontend', description: 'Docker Image Tag')
-        string(name: 'TARGET_GROUP_NAME', defaultValue: 'TargetGroup-1', description: 'AWS ELB Target Group Name')
-        string(name: 'TARGET_EC2_HOSTS', defaultValue: 'ec2-35-171-225-161.compute-1.amazonaws.com,ec2-100-48-207-3.compute-1.amazonaws.com', description: 'Target EC2 hostnames in TargetGroup-1 to deploy to')
+        string(name: 'EC2_HOST', defaultValue: 'ec2-35-171-225-161.compute-1.amazonaws.com', description: 'EC2 Public DNS or IP')
         string(name: 'EC2_USER', defaultValue: 'ubuntu', description: 'EC2 SSH Username')
         string(name: 'PEM_DIR', defaultValue: 'C:\\Users\\Administrator\\Desktop\\ec2', description: 'Local directory on agent containing the PEM key')
         string(name: 'PEM_FILE', defaultValue: 'testubuntu.pem', description: 'SSH Private Key filename')
@@ -16,17 +15,16 @@ pipeline {
     }
 
     environment {
-        AWS_REGION                  = "${params.AWS_REGION}"
-        AWS_ACCOUNT_ID              = "${params.AWS_ACCOUNT_ID}"
-        ECR_REPO_NAME               = "${params.ECR_REPO_NAME}"
-        IMAGE_TAG                   = "${params.IMAGE_TAG}"
-        ECR_REGISTRY                = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        FULL_IMAGE_NAME             = "${ECR_REGISTRY}/${ECR_REPO_NAME}:${IMAGE_TAG}"
-        TARGET_GROUP_NAME           = "${params.TARGET_GROUP_NAME}"
-        TARGET_EC2_HOSTS            = "${params.TARGET_EC2_HOSTS}"
-        EC2_USER                    = "${params.EC2_USER}"
-        PEM_DIR                     = "${params.PEM_DIR}"
-        PEM_FILE                    = "${params.PEM_FILE}"
+        AWS_REGION      = "${params.AWS_REGION}"
+        AWS_ACCOUNT_ID  = "${params.AWS_ACCOUNT_ID}"
+        ECR_REPO_NAME   = "${params.ECR_REPO_NAME}"
+        IMAGE_TAG       = "${params.IMAGE_TAG}"
+        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        FULL_IMAGE_NAME = "${ECR_REGISTRY}/${ECR_REPO_NAME}:${IMAGE_TAG}"
+        EC2_HOST        = "${params.EC2_HOST}"
+        EC2_USER        = "${params.EC2_USER}"
+        PEM_DIR         = "${params.PEM_DIR}"
+        PEM_FILE        = "${params.PEM_FILE}"
         CONTAINER_NAME              = "${params.CONTAINER_NAME}"
         COMPOSE_SERVICE             = "${params.COMPOSE_SERVICE}"
         AWS_SHARED_CREDENTIALS_FILE = 'C:\\Users\\Administrator\\.aws\\credentials'
@@ -84,23 +82,23 @@ pipeline {
         }
 
         // =====================================================================
-        // Stage 4: Pull image from ECR to all Target Group instances and run
+        // Stage 4: Pull image from ECR to EC2 and run for this image only
         // =====================================================================
         stage('Pull the image from ECR to the EC2 instance and run') {
             steps {
-                echo "=== Stage 4: Deploying to all Target Group ${TARGET_GROUP_NAME} instances: ${TARGET_EC2_HOSTS} ==="
+                echo "=== Stage 4: Deploying to EC2 (${EC2_HOST}) ==="
                 script {
                     // Create remote deployment script dynamically
                     writeFile file: 'deploy_remote.sh', text: """#!/bin/bash
 set -e
 
-echo "=== [EC2 \$(hostname)] Logging in to Amazon ECR ==="
+echo "=== [EC2] Logging in to Amazon ECR ==="
 aws ecr get-login-password --region ${AWS_REGION} | sudo docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-echo "=== [EC2 \$(hostname)] Pulling latest image: ${FULL_IMAGE_NAME} ==="
+echo "=== [EC2] Pulling latest image: ${FULL_IMAGE_NAME} ==="
 sudo docker pull ${FULL_IMAGE_NAME}
 
-echo "=== [EC2 \$(hostname)] Stopping running container if active ==="
+echo "=== [EC2] Stopping running container if active ==="
 if [ \$(sudo docker ps -q -f name=${CONTAINER_NAME}) ]; then
     echo "Stopping container ${CONTAINER_NAME}..."
     sudo docker stop ${CONTAINER_NAME}
@@ -111,13 +109,13 @@ if [ \$(sudo docker ps -aq -f name=${CONTAINER_NAME}) ]; then
     sudo docker rm ${CONTAINER_NAME}
 fi
 
-echo "=== [EC2 \$(hostname)] Deleting old image ==="
+echo "=== [EC2] Deleting old image ==="
 sudo docker rmi -f ${FULL_IMAGE_NAME} 2>/dev/null || true
 
-echo "=== [EC2 \$(hostname)] Taking latest image from ECR ==="
+echo "=== [EC2] Taking latest image from ECR ==="
 sudo docker pull ${FULL_IMAGE_NAME}
 
-echo "=== [EC2 \$(hostname)] Running docker compose for ${COMPOSE_SERVICE} service only ==="
+echo "=== [EC2] Running docker compose for ${COMPOSE_SERVICE} service only ==="
 cd /home/ubuntu
 if command -v docker-compose >/dev/null 2>&1; then
     sudo docker-compose up -d --no-deps ${COMPOSE_SERVICE}
@@ -128,85 +126,27 @@ else
     sudo docker run -d --name ${CONTAINER_NAME} -p 80:80 --restart unless-stopped ${FULL_IMAGE_NAME}
 fi
 
-echo "=== [EC2 \$(hostname)] Deployment status ==="
+echo "=== [EC2] Deployment status ==="
 sudo docker ps --filter name=${CONTAINER_NAME}
-"""
-
-                    // Create Target Group deployment script for Windows agent
-                    writeFile file: 'deploy_all_instances.ps1', text: """
-\$ErrorActionPreference = "Stop"
-
-Write-Host "=========================================================="
-Write-Host "Deploying to Target Group instances: \$env:TARGET_GROUP_NAME"
-Write-Host "=========================================================="
-
-# 1. Enforce strict private key permissions for OpenSSH
-\$pemPath = Join-Path \$env:PEM_DIR \$env:PEM_FILE
-Write-Host "Enforcing strict NTFS permissions on: \$pemPath"
-& icacls \$pemPath /inheritance:r | Out-Null
-& icacls \$pemPath /remove "BUILTIN\\Administrators" 2>\$null | Out-Null
-& icacls \$pemPath /remove "A676FB5C1672570\\Administrator" 2>\$null | Out-Null
-& icacls \$pemPath /remove "Administrator" 2>\$null | Out-Null
-& icacls \$pemPath /grant:r "\$(\$env:USERNAME):R" | Out-Null
-& icacls \$pemPath /grant:r "SYSTEM:R" | Out-Null
-
-# 2. Target instances list
-\$targetHosts = [System.Collections.Generic.List[string]]::new()
-\$rawList = \$env:TARGET_EC2_HOSTS -split ',' | ForEach-Object { \$_.Trim() } | Where-Object { \$_ -ne "" }
-foreach (\$h in \$rawList) {
-    if (-not \$targetHosts.Contains(\$h)) {
-        \$targetHosts.Add(\$h)
-    }
-}
-
-if (\$targetHosts.Count -eq 0) {
-    Write-Error "No target instances specified in TARGET_EC2_HOSTS!"
-    exit 1
-}
-
-Write-Host "Target instances configured for deployment (\$targetHosts.Count): \$(\$targetHosts -join ', ')"
-
-# 3. Deploy sequentially to each target instance
-\$remoteScript = "\$env:WORKSPACE\\deploy_remote.sh"
-Set-Location \$env:PEM_DIR
-
-\$deployedReport = [System.Collections.Generic.List[string]]::new()
-\$idx = 1
-foreach (\$hostEntry in \$targetHosts) {
-    Write-Host ""
-    Write-Host "=========================================================="
-    Write-Host "[\${idx}/\$(\$targetHosts.Count)] Deploying to target: \${hostEntry}"
-    Write-Host "=========================================================="
-
-    cmd.exe /c "ssh -i `"\$env:PEM_FILE`" -o StrictHostKeyChecking=no \$env:EC2_USER@\${hostEntry} < `"\$remoteScript`""
-    if (\$LASTEXITCODE -ne 0) {
-        Write-Error "Deployment failed on \${hostEntry} with exit code \$LASTEXITCODE"
-        exit \$LASTEXITCODE
-    }
-    \$timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    Write-Host "[\${idx}/\$(\$targetHosts.Count)] Successfully deployed to \${hostEntry}!"
-    \$deployedReport.Add("  * Instance #\${idx} : \${hostEntry}")
-    \$deployedReport.Add("    - Status       : Image Pulled & Docker Compose Running")
-    \$deployedReport.Add("    - Completed At : \$timestamp UTC")
-    \$idx++
-}
-
-# Save summary to file for Jenkins email notification
-\$summaryPath = "\$env:WORKSPACE\\deployment_summary.txt"
-\$deployedReport | Out-File -FilePath \$summaryPath -Encoding utf8
-
-Write-Host ""
-Write-Host "=========================================================="
-Write-Host "All \$(\$targetHosts.Count) instance(s) in \$env:TARGET_GROUP_NAME successfully updated!"
-Write-Host "=========================================================="
 """
                 }
 
                 bat """
                     @echo off
-                    if exist "%WORKSPACE%\\deployment_summary.txt" del /f /q "%WORKSPACE%\\deployment_summary.txt"
-                    echo Running multi-instance deployment for Target Group %TARGET_GROUP_NAME%...
-                    powershell -ExecutionPolicy Bypass -File "%WORKSPACE%\\deploy_all_instances.ps1"
+                    echo Changing directory to ${PEM_DIR}...
+                    cd /d "${PEM_DIR}"
+
+                    echo Enforcing strict private key permissions for OpenSSH...
+                    icacls "${PEM_FILE}" /inheritance:r
+                    icacls "${PEM_FILE}" /remove "BUILTIN\\Administrators" 2>nul
+                    icacls "${PEM_FILE}" /remove "A676FB5C1672570\\Administrator" 2>nul
+                    icacls "${PEM_FILE}" /remove "Administrator" 2>nul
+                    icacls "${PEM_FILE}" /grant:r "%USERNAME%:R"
+                    icacls "${PEM_FILE}" /grant:r "SYSTEM:R"
+                    icacls "${PEM_FILE}"
+
+                    echo Connecting to ${EC2_USER}@${EC2_HOST} using ${PEM_FILE}...
+                    ssh -i "${PEM_FILE}" -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} < "%WORKSPACE%\\deploy_remote.sh"
                 """
             }
         }
@@ -217,74 +157,36 @@ Write-Host "=========================================================="
             bat """
                 @echo off
                 if exist deploy_remote.sh del /f /q deploy_remote.sh
-                if exist deploy_all_instances.ps1 del /f /q deploy_all_instances.ps1
                 cd /d "${PEM_DIR}"
                 icacls "${PEM_FILE}" /grant:r "Administrator:(F)" 2>nul
             """
         }
         success {
-            script {
-                def deployedInstancesList = "No instance details captured."
-                if (fileExists('deployment_summary.txt')) {
-                    deployedInstancesList = readFile('deployment_summary.txt').trim()
-                }
+            mail(
+                to: 'amishkulkarni03@gmail.com',
+                subject: "SUCCESS: ${JOB_NAME} #${BUILD_NUMBER}",
+                body: """
+Build Successful
 
-                mail(
-                    to: 'amishkulkarni03@gmail.com',
-                    subject: "SUCCESS: ${JOB_NAME} #${BUILD_NUMBER} [${TARGET_GROUP_NAME}]",
-                    body: """======================================================================
-                  PIPELINE DEPLOYMENT REPORT (SUCCESS)
-======================================================================
-Pipeline / Job:     ${JOB_NAME}
-Build Number:       #${BUILD_NUMBER}
-Build Status:       SUCCESS
-Build URL:          ${BUILD_URL}
-
-----------------------------------------------------------------------
-AWS & TARGET GROUP CONFIGURATION:
-----------------------------------------------------------------------
-Target Group:       ${TARGET_GROUP_NAME}
-AWS Region:         ${AWS_REGION}
-AWS Account ID:     ${AWS_ACCOUNT_ID}
-ECR Repository:     ${ECR_REPO_NAME}
-Docker Image:       ${FULL_IMAGE_NAME}
-Compose Service:    ${COMPOSE_SERVICE}
-Container Name:     ${CONTAINER_NAME}
-
-----------------------------------------------------------------------
-EC2 INSTANCES THAT PULLED THE LATEST IMAGE:
-----------------------------------------------------------------------
-${deployedInstancesList}
-
-----------------------------------------------------------------------
-PIPELINE STAGE AUDIT:
-----------------------------------------------------------------------
-[PASSED] Stage 1: Build the webpack (npm install & npm run build)
-[PASSED] Stage 2: Build docker image (${FULL_IMAGE_NAME})
-[PASSED] Stage 3: Push docker image to Amazon ECR
-[PASSED] Stage 4: Pull image from ECR to all TargetGroup instances & run
-======================================================================
+Project: ${JOB_NAME}
+Build: #${BUILD_NUMBER}
+Status: SUCCESS
+Build URL: ${BUILD_URL}
 """
-                )
-            }
+            )
         }
 
         failure {
             mail(
                 to: 'amishkulkarni03@gmail.com',
-                subject: "FAILED: ${JOB_NAME} #${BUILD_NUMBER} [${TARGET_GROUP_NAME}]",
-                body: """======================================================================
-                  PIPELINE EXECUTION FAILED
-======================================================================
-Project:       ${JOB_NAME}
-Build Number:  #${BUILD_NUMBER}
-Build Status:  FAILURE
-Build URL:     ${BUILD_URL}
-Target Group:  ${TARGET_GROUP_NAME}
-Docker Image:  ${FULL_IMAGE_NAME}
+                subject: "FAILED: ${JOB_NAME} #${BUILD_NUMBER}",
+                body: """
+Build Failed
 
-Please check the build console logs at the URL above to inspect the error.
-======================================================================
+Project: ${JOB_NAME}
+Build: #${BUILD_NUMBER}
+Status: FAILURE
+Build URL: ${BUILD_URL}
 """
             )
         }
