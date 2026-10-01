@@ -214,6 +214,7 @@ Write-Host "Total instances to deploy: \$(\$targetHosts.Count) (\$(\$targetHosts
 \$remoteScript = "\$env:WORKSPACE\\deploy_remote.sh"
 Set-Location \$env:PEM_DIR
 
+\$deployedReport = [System.Collections.Generic.List[string]]::new()
 \$idx = 1
 foreach (\$hostEntry in \$targetHosts) {
     Write-Host ""
@@ -226,9 +227,17 @@ foreach (\$hostEntry in \$targetHosts) {
         Write-Error "Deployment failed on \$hostEntry with exit code \$LASTEXITCODE"
         exit \$LASTEXITCODE
     }
+    \$timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     Write-Host "[\$idx/\$(\$targetHosts.Count)] Successfully deployed to \$hostEntry!"
+    \$deployedReport.Add("  * Instance #\$idx : \$hostEntry")
+    \$deployedReport.Add("    - Status       : Image Pulled & Docker Compose Running")
+    \$deployedReport.Add("    - Completed At : \$timestamp UTC")
     \$idx++
 }
+
+# Save summary to file for Jenkins email notification
+\$summaryPath = "\$env:WORKSPACE\\deployment_summary.txt"
+\$deployedReport | Out-File -FilePath \$summaryPath -Encoding utf8
 
 Write-Host ""
 Write-Host "=========================================================="
@@ -239,6 +248,7 @@ Write-Host "=========================================================="
 
                 bat """
                     @echo off
+                    if exist "%WORKSPACE%\\deployment_summary.txt" del /f /q "%WORKSPACE%\\deployment_summary.txt"
                     echo Running multi-instance deployment for Target Group %TARGET_GROUP_NAME%...
                     powershell -ExecutionPolicy Bypass -File "%WORKSPACE%\\deploy_all_instances.ps1"
                 """
@@ -257,33 +267,68 @@ Write-Host "=========================================================="
             """
         }
         success {
-            mail(
-                to: 'amishkulkarni03@gmail.com',
-                subject: "SUCCESS: ${JOB_NAME} #${BUILD_NUMBER}",
-                body: """
-Build Successful
+            script {
+                def deployedInstancesList = "No instance details captured."
+                if (fileExists('deployment_summary.txt')) {
+                    deployedInstancesList = readFile('deployment_summary.txt').trim()
+                }
 
-Project: ${JOB_NAME}
-Build: #${BUILD_NUMBER}
-Status: SUCCESS
-Build URL: ${BUILD_URL}
-Target Group: ${TARGET_GROUP_NAME}
+                mail(
+                    to: 'amishkulkarni03@gmail.com',
+                    subject: "SUCCESS: ${JOB_NAME} #${BUILD_NUMBER} [${TARGET_GROUP_NAME}]",
+                    body: """======================================================================
+                  PIPELINE DEPLOYMENT REPORT (SUCCESS)
+======================================================================
+Pipeline / Job:     ${JOB_NAME}
+Build Number:       #${BUILD_NUMBER}
+Build Status:       SUCCESS
+Build URL:          ${BUILD_URL}
+
+----------------------------------------------------------------------
+AWS & TARGET GROUP CONFIGURATION:
+----------------------------------------------------------------------
+Target Group:       ${TARGET_GROUP_NAME}
+AWS Region:         ${AWS_REGION}
+AWS Account ID:     ${AWS_ACCOUNT_ID}
+ECR Repository:     ${ECR_REPO_NAME}
+Docker Image:       ${FULL_IMAGE_NAME}
+Compose Service:    ${COMPOSE_SERVICE}
+Container Name:     ${CONTAINER_NAME}
+
+----------------------------------------------------------------------
+EC2 INSTANCES THAT PULLED THE LATEST IMAGE:
+----------------------------------------------------------------------
+${deployedInstancesList}
+
+----------------------------------------------------------------------
+PIPELINE STAGE AUDIT:
+----------------------------------------------------------------------
+[PASSED] Stage 1: Build the webpack (npm install & npm run build)
+[PASSED] Stage 2: Build docker image (${FULL_IMAGE_NAME})
+[PASSED] Stage 3: Push docker image to Amazon ECR
+[PASSED] Stage 4: Pull image from ECR to all TargetGroup instances & run
+======================================================================
 """
-            )
+                )
+            }
         }
 
         failure {
             mail(
                 to: 'amishkulkarni03@gmail.com',
-                subject: "FAILED: ${JOB_NAME} #${BUILD_NUMBER}",
-                body: """
-Build Failed
+                subject: "FAILED: ${JOB_NAME} #${BUILD_NUMBER} [${TARGET_GROUP_NAME}]",
+                body: """======================================================================
+                  PIPELINE EXECUTION FAILED
+======================================================================
+Project:       ${JOB_NAME}
+Build Number:  #${BUILD_NUMBER}
+Build Status:  FAILURE
+Build URL:     ${BUILD_URL}
+Target Group:  ${TARGET_GROUP_NAME}
+Docker Image:  ${FULL_IMAGE_NAME}
 
-Project: ${JOB_NAME}
-Build: #${BUILD_NUMBER}
-Status: FAILURE
-Build URL: ${BUILD_URL}
-Target Group: ${TARGET_GROUP_NAME}
+Please check the build console logs at the URL above to inspect the error.
+======================================================================
 """
             )
         }
