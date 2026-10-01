@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  s3-backend:
+    build:
+      context: ./s3-backend-service
+      dockerfile: Dockerfile
+    image: s3-backend-service:latest
+    container_name: s3-backend-service
+    ports:
+      - "28080:28080"
+    environment:
+      - SERVER_PORT=28080
+      # AWS credentials configured via .env or environment variables (Frontend does NOT accept credentials)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_BUCKET_NAME=${AWS_BUCKET_NAME:-s3-test-01-navaneeth}
+      - AWS_S3_ENDPOINT=${AWS_S3_ENDPOINT:-}
+      - AWS_FORCE_PATH_STYLE=${AWS_FORCE_PATH_STYLE:-false}
+    restart: unless-stopped
+
+  s3-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: s3-frontend-app:latest
+    container_name: s3-frontend-app
+    ports:
+      - "80:80"
+    environment:
+      - BACKEND_URL=http://s3-backend:28080
+    depends_on:
+      - s3-backend
+    restart: unless-stopped

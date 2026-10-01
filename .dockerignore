@@ -1,0 +1,6 @@
+node_modules
+dist
+.git
+.gitignore
+s3-backend-service
+.dockerignore
